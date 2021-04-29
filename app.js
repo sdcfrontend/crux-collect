@@ -105,7 +105,6 @@ const getAllRecords = async pages => await Promise.all(pages.map(page => getAndS
 const collectMetrics = pipe(
   log('Getting pages...'),
   getPages,
-  log('Getting records for all pages...'),
   getAllRecords,
   log('All records stored.')
 );
