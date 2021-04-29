@@ -57,7 +57,6 @@ const getRecords = async page => {
 }
 
 const storeRecords = page => async records => {
-  console.log({pageId: page._id, devices: records})
   try {
     const requestBody = {
       pageId: page._id,
