@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const fetch = require('node-fetch');
+var cuid = require('cuid');
 require('dotenv/config');
 
 const app = express();
@@ -12,11 +13,29 @@ app.use(express.urlencoded({
   extended: true
 }));
 
-const pipe = (...fns) => input => fns.reduce((chain, fn) => chain.then(fn), Promise.resolve(input));
+const requiredDevices = ['PHONE', 'DESKTOP'];
+const metricsOrder = ['largest_contentful_paint', 'first_input_delay', 'cumulative_layout_shift', 'first_contentful_paint'];
+
+const promisePipe = (...fns) => input => fns.reduce((chain, fn) => chain.then(fn), Promise.resolve(input));
+const pipe = (...fns) => (...x) => fns.reduce((v, f) => f(v), ...x);
 const log = message => value => {
   console.log(message);
   return value;
 }
+
+const metricsToArray = record => {
+  return { ...record, metrics: Object.entries(record.metrics) }
+};
+const sortMetricsToOrder = order => record => ({ ...record, metrics: record.metrics.sort((a, b) => order.indexOf(Object.values(a)[0]) - order.indexOf(Object.values(b)[0])) });
+const transform = record => record.metrics.map(metric => {
+  return { [metric[0]]: { [record.key.formFactor]: { histogram: metric[1].histogram, percentiles: metric[1].percentiles } } }
+});
+
+const metricsToOrderedArray = (record, order) => pipe(
+  metricsToArray,
+  sortMetricsToOrder(order),
+  transform
+)(record)
 
 const requestDeviceRecord = async requestBody => {
   try {
@@ -27,32 +46,43 @@ const requestDeviceRecord = async requestBody => {
     };
 
     const response = await fetch(`${endpointUrl}?key=${process.env.CRUX_API_KEY}`, requestOptions);
-    const record = await response.json();
+    const data = await response.json();
 
-    return record;
+    return metricsToOrderedArray(data.record, metricsOrder);
   }
 
   catch(error) {
-    setError(error);
+    console.log(error);
   }
 }
 
-const getRecords = async page => {
+const getRecords = devices => async page => {
   const requestBody = {
     origin: page.url
   }
 
   try {
-    const mobileRecord = await requestDeviceRecord({ ...requestBody, formFactor: 'PHONE' });
-    const desktopRecord = await requestDeviceRecord({ ...requestBody, formFactor: 'DESKTOP' });
-
-    return Promise.all([mobileRecord, desktopRecord]).then(allRecords => {
-      return { mobile: allRecords[0], desktop: allRecords[1] };
-    });
+    return Promise.all(
+      devices.map(async device => (
+        await requestDeviceRecord({ ...requestBody, formFactor: device })
+      )))
+      .then(allDeviceRecords => {
+        const mergedDevices = allDeviceRecords[0].map((metric, index) => {
+          return { 
+            _id: cuid(),
+            name: Object.keys(metric)[0],
+            ...{ 
+              ...metric[Object.keys(metric)[0]],
+              ...allDeviceRecords[1][index][Object.keys(allDeviceRecords[1][index])[0]]
+            }
+          }
+        })
+        return mergedDevices
+      })
   }
 
   catch(error) {
-    setError(error);
+    console.log(error);
   }
 }
 
@@ -60,7 +90,7 @@ const storeRecords = page => async records => {
   try {
     const requestBody = {
       pageId: page._id,
-      devices: records
+      metrics: records
     }
     const requestOptions = {
       method: 'POST',
@@ -80,9 +110,9 @@ const storeRecords = page => async records => {
   }
 }
 
-const getAndStoreRecords = page => pipe(
+const getPageRecords = (page, devices) => promisePipe(
   log(`Getting records for ${page.url}`),
-  getRecords,
+  getRecords(devices),
   log(`Storing records for ${page.url}`),
   storeRecords(page)
 )(page);
@@ -100,17 +130,19 @@ const getPages = async () => {
   }
 }
 
-const getAllRecords = async pages => await Promise.all(pages.map(page => getAndStoreRecords(page)));
+const getAllPageRecords = devices => async pages => await Promise.all(pages.map(page => getPageRecords(page, devices)));
 
-const collectMetrics = pipe(
+const collectMetrics = devices => promisePipe(
   log('Getting pages...'),
   getPages,
-  getAllRecords,
+  getAllPageRecords(devices),
   log('All records stored.')
-);
+)(devices);
 
 cron.schedule('0 0 0 * * *', () => {
-  collectMetrics();
+  collectMetrics(requiredDevices);
 });
+
+// collectMetrics(requiredDevices);
 
 app.listen(5000);
