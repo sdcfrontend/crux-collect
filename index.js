@@ -58,7 +58,7 @@ const requestDeviceRecord = async requestBody => {
 
 const getRecords = devices => async page => {
   const requestBody = {
-    origin: page.url
+    url: page.url
   }
 
   try {
